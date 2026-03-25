@@ -114,6 +114,47 @@ python main.py --save-dataset
 
 > **模型下载**：首次运行时，程序会自动下载约 500MB 的模型文件，请确保网络连接稳定。
 
+## 🌐 Volcengine 火山引擎 BigASR 流式识别后端（可选）
+
+除了默认的本地 FunASR 离线引擎，VocoType CLI 还支持接入[火山引擎豆包大模型流式语音识别](https://www.volcengine.com/docs/6561/1354869)作为云端识别后端。
+
+### 优势
+
+| 特性 | 本地 FunASR | Volcengine BigASR |
+|:--|:--:|:--:|
+| 网络要求 | 无 | 需要联网 |
+| 模型下载 | ~500 MB | 无需下载 |
+| 响应延迟 | 本地推理 | 云端极低延迟 |
+| 识别质量 | 高 | 旗舰级大模型 |
+| 数据隐私 | 完全离线 | 音频发送至火山引擎 |
+
+### 配置步骤
+
+1. 登录[火山引擎控制台](https://console.volcengine.com/speech/app)，创建一个语音应用，获取 **App Key** 和 **Access Key**。
+
+2. 在项目目录创建 `config.json`：
+
+```json
+{
+  "backend": "volcengine",
+  "volcengine": {
+    "app_key": "YOUR_APP_KEY",
+    "access_key": "YOUR_ACCESS_KEY",
+    "resource_id": "volc.bigasr.sauc.duration",
+    "enable_punc": true,
+    "enable_itn": true
+  }
+}
+```
+
+3. 以 `--config` 参数启动：
+
+```bash
+python main.py --config config.json
+```
+
+> **注意**：使用 Volcengine 后端时，录音数据会发送到火山引擎服务器进行识别，不再完全离线。如对隐私有严格要求，请继续使用默认的本地 FunASR 后端。
+
 ## 常见问题 (FAQ)
 
 **Q: 我的数据安全吗？**

@@ -25,12 +25,33 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "min_silence_ms": 200,
         "pad_ms": 200,
     },
+    # 识别后端：funasr（本地离线）或 volcengine（火山引擎云端流式）
+    "backend": "funasr",
     "asr": {
         "use_vad": False,
         "use_punc": True,
         "language": "zh",
         "hotword": "",
         "batch_size_s": 60.0,
+    },
+    # 火山引擎 BigASR 流式识别配置（仅当 backend == "volcengine" 时生效）
+    # 文档：https://www.volcengine.com/docs/6561/1354869
+    "volcengine": {
+        # 在火山引擎控制台 https://console.volcengine.com/speech/app 创建应用后获取
+        "app_key": "",
+        "access_key": "",
+        # 资源 ID，默认按时长计费
+        "resource_id": "volc.bigasr.sauc.duration",
+        # WebSocket 端点（一般无需修改）
+        "url": "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel",
+        # 识别模型名称
+        "model_name": "bigmodel",
+        # 每次发送的音频时长（毫秒），越小延迟越低
+        "chunk_ms": 100,
+        # 是否添加标点
+        "enable_punc": True,
+        # 是否启用数字/格式规范化（ITN）
+        "enable_itn": True,
     },
     "output": {
         "dedupe": True,

@@ -90,12 +90,6 @@ def main() -> None:
             logger.debug("清理 worker 时出错: %s", exc)
         
         try:
-            # 显式清理 FunASR 模型资源
-            worker.fun_server.cleanup()
-        except Exception as exc:
-            logger.debug("清理 FunASR 服务器时出错: %s", exc)
-        
-        try:
             hotkeys.cleanup()
         except Exception as exc:
             logger.debug("清理热键时出错: %s", exc)

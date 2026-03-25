@@ -1,4 +1,4 @@
-"""Session-based transcription worker using FunASR once per recording."""
+"""Session-based transcription worker — supports FunASR (local) and Volcengine (cloud) backends."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ import numpy as np
 
 from .audio_capture import AudioCapture
 from .config import ensure_logging_dir, load_config
-from app.funasr_server import FunASRServer
 
 
 logger = logging.getLogger(__name__)
@@ -55,10 +54,24 @@ class TranscriptionWorker:
             device=audio_cfg.get("device"),
         )
 
-        self.fun_server = FunASRServer()
-        init_result = self.fun_server.initialize()
-        if not init_result.get("success"):
-            raise RuntimeError(f"FunASR 初始化失败: {init_result}")
+        backend = self.config.get("backend", "funasr").lower()
+        self._backend = backend
+
+        if backend == "volcengine":
+            from app.volcengine_asr import VolcengineASRClient
+            self._volcengine_client = VolcengineASRClient(
+                self.config.get("volcengine", {})
+            )
+            self.fun_server = None  # 不使用本地 FunASR 模型
+            logger.info("使用 Volcengine BigASR 流式识别后端")
+        else:
+            from app.funasr_server import FunASRServer
+            self._volcengine_client = None
+            self.fun_server = FunASRServer()
+            init_result = self.fun_server.initialize()
+            if not init_result.get("success"):
+                raise RuntimeError(f"FunASR 初始化失败: {init_result}")
+            logger.info("使用 FunASR 本地离线识别后端")
 
         self._running = threading.Event()
         self._recording = threading.Event()
@@ -97,7 +110,7 @@ class TranscriptionWorker:
             logger.debug("析构函数清理时出错: %s", exc)
 
     def cleanup(self) -> None:
-        """清理所有资源，包括缓冲区和音频设备"""
+        """清理所有资源，包括缓冲区、音频设备和 ASR 后端。"""
         logger.debug("开始清理 TranscriptionWorker 资源")
         try:
             # 停止录音
@@ -114,7 +127,13 @@ class TranscriptionWorker:
             # 停止音频捕获
             if hasattr(self, 'audio'):
                 self.audio.stop()
-                
+
+            # 清理 ASR 后端资源
+            if self.fun_server is not None:
+                self.fun_server.cleanup()
+            elif self._volcengine_client is not None:
+                self._volcengine_client.cleanup()
+
             logger.debug("TranscriptionWorker 资源清理完成")
         except Exception as exc:
             logger.error("清理资源时出错: %s", exc)
@@ -347,17 +366,7 @@ class TranscriptionWorker:
         import wave
 
         sample_rate = self._audio_cfg["sample_rate"]
-        recent_path = Path(self.log_dir) / "recent.wav"
-        os.makedirs(recent_path.parent, exist_ok=True)
-        tmp_recent_fd, tmp_recent_path = tempfile.mkstemp(prefix="recent_", suffix=".wav", dir=recent_path.parent)
-        os.close(tmp_recent_fd)
-        with wave.open(str(tmp_recent_path), "wb") as wf_recent:
-            wf_recent.setnchannels(1)
-            wf_recent.setsampwidth(2)
-            wf_recent.setframerate(sample_rate)
-            wf_recent.writeframes(samples.tobytes())
-        os.replace(tmp_recent_path, recent_path)
-        self.last_segment_path = recent_path
+        self._write_recent_wav(samples)
 
         fd, path = tempfile.mkstemp(prefix="asr_session_", suffix=".wav")
         os.close(fd)
@@ -369,7 +378,33 @@ class TranscriptionWorker:
 
         return path
 
+    def _write_recent_wav(self, samples: np.ndarray) -> None:
+        """将最近一次录音保存为 recent.wav（供调试用），更新 last_segment_path。"""
+        import wave
+
+        sample_rate = self._audio_cfg["sample_rate"]
+        recent_path = Path(self.log_dir) / "recent.wav"
+        os.makedirs(recent_path.parent, exist_ok=True)
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            prefix="recent_", suffix=".wav", dir=recent_path.parent
+        )
+        os.close(tmp_fd)
+        with wave.open(str(tmp_path), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate)
+            wf.writeframes(samples.tobytes())
+        os.replace(tmp_path, recent_path)
+        self.last_segment_path = recent_path
+
     def _transcribe_once(self, samples: np.ndarray) -> None:
+        if self._backend == "volcengine":
+            self._transcribe_once_volcengine(samples)
+        else:
+            self._transcribe_once_funasr(samples)
+
+    def _transcribe_once_funasr(self, samples: np.ndarray) -> None:
+        """使用本地 FunASR 进行转录。"""
         tmp_path = self._write_temp_wav(samples)
         start = time.time()
         try:
@@ -384,7 +419,33 @@ class TranscriptionWorker:
             except OSError:
                 logger.debug("删除临时文件失败: %s", tmp_path)
 
+        self._dispatch_result(asr_result, inference_latency)
 
+    def _transcribe_once_volcengine(self, samples: np.ndarray) -> None:
+        """使用 Volcengine BigASR 流式识别进行转录。"""
+        # 保存 recent.wav 供调试（与 FunASR 路径保持一致）
+        self._write_recent_wav(samples)
+
+        sample_rate = self._audio_cfg["sample_rate"]
+        # 仅传递影响识别行为的选项，不包含凭据字段
+        volcengine_cfg = self.config.get("volcengine", {})
+        transcribe_options = {
+            k: volcengine_cfg[k]
+            for k in ("enable_punc", "enable_itn")
+            if k in volcengine_cfg
+        }
+        start = time.time()
+        asr_result = self._volcengine_client.transcribe(
+            samples,
+            sample_rate=sample_rate,
+            options=transcribe_options,
+        )
+        inference_latency = time.time() - start
+
+        self._dispatch_result(asr_result, asr_result.get("inference_latency", inference_latency))
+
+    def _dispatch_result(self, asr_result: dict, inference_latency: float) -> None:
+        """将 ASR 结果包装成 TranscriptionResult 并回调。"""
         if not asr_result.get("success"):
             result = TranscriptionResult(
                 text="",
@@ -395,12 +456,9 @@ class TranscriptionWorker:
                 error=asr_result.get("error", "unknown"),
             )
         else:
-            final_text = asr_result.get("text", "")
-            raw_text = asr_result.get("raw_text", "")
-
             result = TranscriptionResult(
-                text=final_text,
-                raw_text=raw_text,
+                text=asr_result.get("text", ""),
+                raw_text=asr_result.get("raw_text", ""),
                 duration=asr_result.get("duration", 0.0),
                 inference_latency=inference_latency,
                 confidence=asr_result.get("confidence", 0.0),
